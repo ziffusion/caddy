@@ -3,5 +3,3 @@ services:
     container_name: caddy
     build:
       context: .
-    image: caddy:latest
-    restart: unless-stopped
