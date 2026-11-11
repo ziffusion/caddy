@@ -1,12 +1,7 @@
 services:
   caddy:
+    container_name: caddy
     build:
       context: .
     image: caddy:latest
-    container_name: caddy
     restart: unless-stopped
-    volumes:
-      - ./etc:/etc/caddy
-      - ./webdav:/srv/webdav
-      - ./data:/data
-      - ./config:/config
