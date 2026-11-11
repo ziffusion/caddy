@@ -26,5 +26,5 @@ jobs:
           push: true
           pull: true
           tags: |
-            ghcr.io/youruser/caddy-webdav:latest
-            ghcr.io/youruser/caddy-webdav:${{ github.run_number }}
+            ghcr.io/ziffusion/caddy:latest
+            ghcr.io/ziffusion/caddy:${{ github.run_number }}
