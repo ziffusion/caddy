@@ -1,7 +1,7 @@
 name: build
 on:
   schedule:
-    - cron: "0 4 * * 1"   # Mondays 04:00 UTC
+    - cron: "0 4 * * *"   # every day at 04:00 UTC
   workflow_dispatch:
   push:
     branches: [main]
