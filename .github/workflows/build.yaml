@@ -8,13 +8,8 @@ on:
 
 env:
   TARGET_IMAGE: ghcr.io/ziffusion/caddy
-  DOCKER_IMAGES: |
-    caddy:builder
-    caddy:latest
-  GO_MODULES: |
-    github.com/mholt/caddy-webdav
-    github.com/caddyserver/forwardproxy
-    github.com/lucaslorentz/caddy-docker-proxy/v2
+  DOCKER_IMAGES: "caddy:builder caddy:latest"
+  GO_MODULES: "://github.com ://github.com ://github.com"
 
 jobs:
   build:
@@ -37,14 +32,14 @@ jobs:
           UPSTREAM_STATE=""
 
           # 1. Check both caddy:builder and caddy:latest digests
-          for img in ${{ env.DOCKER_IMAGES }}; do
+          for img in $DOCKER_IMAGES; do
             DIGEST=$(docker buildx imagetools inspect "$img" --format '{{json .Manifest.Digest}}' | tr -d '"')
             echo "Upstream image [$img]: $DIGEST"
             UPSTREAM_STATE="${UPSTREAM_STATE}${img}=${DIGEST};"
           done
 
           # 2. Check latest version/pseudo-version of each Go module
-          for mod in ${{ env.GO_MODULES }}; do
+          for mod in $GO_MODULES; do
             MOD_VER=$(curl -fsSL "https://golang.org{mod}/@latest" | jq -r '.Version')
             echo "Upstream module [$mod]: $MOD_VER"
             UPSTREAM_STATE="${UPSTREAM_STATE}${mod}=${MOD_VER};"
@@ -53,10 +48,10 @@ jobs:
           echo "upstream_state=$UPSTREAM_STATE" >> $GITHUB_OUTPUT
 
           # 3. Read the saved state label from our current linux/amd64 image on GHCR
-          AMD64_DIGEST=$(docker buildx imagetools inspect ${{ env.TARGET_IMAGE }}:latest --raw 2>/dev/null | jq -r '.manifests[] | select(.platform.architecture == "amd64") | .digest' || echo "")
+          AMD64_DIGEST=$(docker buildx imagetools inspect "${TARGET_IMAGE}:latest" --raw 2>/dev/null | jq -r '.manifests[] | select(.platform.architecture == "amd64") | .digest' || echo "")
 
           if [[ -n "$AMD64_DIGEST" ]]; then
-            CURRENT_STATE=$(docker buildx imagetools inspect ${{ env.TARGET_IMAGE }}@${AMD64_DIGEST} --format '{{index .Image.Config.Labels "org.opencontainers.image.base.digest"}}' 2>/dev/null || echo "none")
+            CURRENT_STATE=$(docker buildx imagetools inspect "${TARGET_IMAGE}@${AMD64_DIGEST}" --format '{{index .Image.Config.Labels "org.opencontainers.image.base.digest"}}' 2>/dev/null || echo "none")
           else
             CURRENT_STATE="none"
           fi
