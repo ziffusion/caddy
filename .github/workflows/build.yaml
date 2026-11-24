@@ -6,6 +6,10 @@ on:
   push:
     branches: [main]
 
+env:
+  UPSTREAM_IMAGE: caddy:latest
+  TARGET_IMAGE: ghcr.io/ziffusion/caddy
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -14,17 +18,42 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check for upstream changes
+        id: check
+        run: |
+          # Get the current upstream image digest
+          UPSTREAM_DIGEST=$(docker buildx imagetools inspect ${{ env.UPSTREAM_IMAGE }} --format '{{json .Manifest.Digest}}' | tr -d '"')
+          echo "upstream_digest=$UPSTREAM_DIGEST" >> $GITHUB_OUTPUT
+
+          # Get the upstream digest saved in our last published image's label (if it exists)
+          CURRENT_DIGEST=$(docker buildx imagetools inspect ${{ env.TARGET_IMAGE }}:latest --format '{{index .Image.Config.Labels "org.opencontainers.image.base.digest"}}' 2>/dev/null || echo "none")
+
+          # Build if triggered by a git push/manual run, or if the upstream digest changed
+          if [[ "${{ github.event_name }}" != "schedule" ]] || [[ "$UPSTREAM_DIGEST" != "$CURRENT_DIGEST" ]]; then
+            echo "needs_build=true" >> $GITHUB_OUTPUT
+          else
+            echo "needs_build=false" >> $GITHUB_OUTPUT
+            echo "No upstream changes detected ($UPSTREAM_DIGEST). Skipping build."
+          fi
+
+      - uses: docker/setup-buildx-action@v3
+        if: steps.check.outputs.needs_build == 'true'
+
       - uses: docker/build-push-action@v6
+        if: steps.check.outputs.needs_build == 'true'
         with:
           context: .
           push: true
           pull: true
+          labels: |
+            org.opencontainers.image.base.digest=${{ steps.check.outputs.upstream_digest }}
           tags: |
-            ghcr.io/ziffusion/caddy:latest
-            ghcr.io/ziffusion/caddy:${{ github.run_number }}
+            ${{ env.TARGET_IMAGE }}:latest
+            ${{ env.TARGET_IMAGE }}:${{ github.run_number }}
