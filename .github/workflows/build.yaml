@@ -7,8 +7,10 @@ on:
     branches: [main]
 
 env:
-  UPSTREAM_IMAGE: caddy:latest
   TARGET_IMAGE: ghcr.io/ziffusion/caddy
+  DOCKER_IMAGES: |
+    caddy:builder
+    caddy:latest
   GO_MODULES: |
     github.com/mholt/caddy-webdav
     github.com/caddyserver/forwardproxy
@@ -32,12 +34,16 @@ jobs:
       - name: Check for upstream changes
         id: check
         run: |
-          # 1. Check base Docker image digest
-          IMAGE_DIGEST=$(docker buildx imagetools inspect ${{ env.UPSTREAM_IMAGE }} --format '{{json .Manifest.Digest}}' | tr -d '"')
-          UPSTREAM_STATE="image=${IMAGE_DIGEST};"
-          echo "Upstream image [${{ env.UPSTREAM_IMAGE }}]: $IMAGE_DIGEST"
+          UPSTREAM_STATE=""
 
-          # 2. Check latest version of each Go module via proxy.golang.org
+          # 1. Check both caddy:builder and caddy:latest digests
+          for img in ${{ env.DOCKER_IMAGES }}; do
+            DIGEST=$(docker buildx imagetools inspect "$img" --format '{{json .Manifest.Digest}}' | tr -d '"')
+            echo "Upstream image [$img]: $DIGEST"
+            UPSTREAM_STATE="${UPSTREAM_STATE}${img}=${DIGEST};"
+          done
+
+          # 2. Check latest version/pseudo-version of each Go module
           for mod in ${{ env.GO_MODULES }}; do
             MOD_VER=$(curl -fsSL "https://golang.org{mod}/@latest" | jq -r '.Version')
             echo "Upstream module [$mod]: $MOD_VER"
@@ -66,10 +72,10 @@ jobs:
             echo "Decision: Proceeding with build (triggered by '${{ github.event_name }}' event)."
           elif [[ "$UPSTREAM_STATE" != "$CURRENT_STATE" ]]; then
             echo "needs_build=true" >> $GITHUB_OUTPUT
-            echo "Decision: Proceeding with build (upstream image or plugin changed)."
+            echo "Decision: Proceeding with build (one or more upstreams changed)."
           else
             echo "needs_build=false" >> $GITHUB_OUTPUT
-            echo "Decision: Skipping build (scheduled run and all upstreams unchanged)."
+            echo "Decision: Skipping build (scheduled run and all 5 upstreams unchanged)."
           fi
 
       - uses: docker/setup-buildx-action@v3
