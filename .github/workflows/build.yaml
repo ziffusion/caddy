@@ -28,19 +28,29 @@ jobs:
       - name: Check for upstream changes
         id: check
         run: |
-          # Get the current upstream image digest
+          # Get the top-level manifest digest of the upstream image
           UPSTREAM_DIGEST=$(docker buildx imagetools inspect ${{ env.UPSTREAM_IMAGE }} --format '{{json .Manifest.Digest}}' | tr -d '"')
           echo "upstream_digest=$UPSTREAM_DIGEST" >> $GITHUB_OUTPUT
 
-          # Get the upstream digest saved in our last published image's label (if it exists)
-          CURRENT_DIGEST=$(docker buildx imagetools inspect ${{ env.TARGET_IMAGE }}:latest --format '{{index .Image.Config.Labels "org.opencontainers.image.base.digest"}}' 2>/dev/null || echo "none")
+          # Resolve the linux/amd64 child digest from our published image, then read its config label
+          AMD64_DIGEST=$(docker buildx imagetools inspect ${{ env.TARGET_IMAGE }}:latest --raw 2>/dev/null | jq -r '.manifests[] | select(.platform.architecture == "amd64") | .digest' || echo "")
 
-          # Build if triggered by a git push/manual run, or if the upstream digest changed
+          if [[ -n "$AMD64_DIGEST" ]]; then
+            CURRENT_DIGEST=$(docker buildx imagetools inspect ${{ env.TARGET_IMAGE }}@${AMD64_DIGEST} --format '{{index .Image.Config.Labels "org.opencontainers.image.base.digest"}}' 2>/dev/null || echo "none")
+          else
+            CURRENT_DIGEST="none"
+          fi
+
+          echo "Trigger event:        ${{ github.event_name }}"
+          echo "Upstream digest:      $UPSTREAM_DIGEST"
+          echo "Current image digest: $CURRENT_DIGEST"
+
           if [[ "${{ github.event_name }}" != "schedule" ]] || [[ "$UPSTREAM_DIGEST" != "$CURRENT_DIGEST" ]]; then
             echo "needs_build=true" >> $GITHUB_OUTPUT
+            echo "Decision: Proceeding with build."
           else
             echo "needs_build=false" >> $GITHUB_OUTPUT
-            echo "No upstream changes detected ($UPSTREAM_DIGEST). Skipping build."
+            echo "Decision: No upstream changes detected. Skipping build."
           fi
 
       - uses: docker/setup-buildx-action@v3
