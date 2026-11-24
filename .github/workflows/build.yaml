@@ -9,6 +9,10 @@ on:
 env:
   UPSTREAM_IMAGE: caddy:latest
   TARGET_IMAGE: ghcr.io/ziffusion/caddy
+  GO_MODULES: |
+    github.com/mholt/caddy-webdav
+    github.com/caddyserver/forwardproxy
+    github.com/lucaslorentz/caddy-docker-proxy/v2
 
 jobs:
   build:
@@ -28,29 +32,44 @@ jobs:
       - name: Check for upstream changes
         id: check
         run: |
-          # Get the top-level manifest digest of the upstream image
-          UPSTREAM_DIGEST=$(docker buildx imagetools inspect ${{ env.UPSTREAM_IMAGE }} --format '{{json .Manifest.Digest}}' | tr -d '"')
-          echo "upstream_digest=$UPSTREAM_DIGEST" >> $GITHUB_OUTPUT
+          # 1. Check base Docker image digest
+          IMAGE_DIGEST=$(docker buildx imagetools inspect ${{ env.UPSTREAM_IMAGE }} --format '{{json .Manifest.Digest}}' | tr -d '"')
+          UPSTREAM_STATE="image=${IMAGE_DIGEST};"
+          echo "Upstream image [${{ env.UPSTREAM_IMAGE }}]: $IMAGE_DIGEST"
 
-          # Resolve the linux/amd64 child digest from our published image, then read its config label
+          # 2. Check latest version of each Go module via proxy.golang.org
+          for mod in ${{ env.GO_MODULES }}; do
+            MOD_VER=$(curl -fsSL "https://golang.org{mod}/@latest" | jq -r '.Version')
+            echo "Upstream module [$mod]: $MOD_VER"
+            UPSTREAM_STATE="${UPSTREAM_STATE}${mod}=${MOD_VER};"
+          done
+
+          echo "upstream_state=$UPSTREAM_STATE" >> $GITHUB_OUTPUT
+
+          # 3. Read the saved state label from our current linux/amd64 image on GHCR
           AMD64_DIGEST=$(docker buildx imagetools inspect ${{ env.TARGET_IMAGE }}:latest --raw 2>/dev/null | jq -r '.manifests[] | select(.platform.architecture == "amd64") | .digest' || echo "")
 
           if [[ -n "$AMD64_DIGEST" ]]; then
-            CURRENT_DIGEST=$(docker buildx imagetools inspect ${{ env.TARGET_IMAGE }}@${AMD64_DIGEST} --format '{{index .Image.Config.Labels "org.opencontainers.image.base.digest"}}' 2>/dev/null || echo "none")
+            CURRENT_STATE=$(docker buildx imagetools inspect ${{ env.TARGET_IMAGE }}@${AMD64_DIGEST} --format '{{index .Image.Config.Labels "org.opencontainers.image.base.digest"}}' 2>/dev/null || echo "none")
           else
-            CURRENT_DIGEST="none"
+            CURRENT_STATE="none"
           fi
 
-          echo "Trigger event:        ${{ github.event_name }}"
-          echo "Upstream digest:      $UPSTREAM_DIGEST"
-          echo "Current image digest: $CURRENT_DIGEST"
+          echo "----------------------------------------"
+          echo "Trigger event:       ${{ github.event_name }}"
+          echo "Upstream state:      $UPSTREAM_STATE"
+          echo "Current image label: $CURRENT_STATE"
+          echo "----------------------------------------"
 
-          if [[ "${{ github.event_name }}" != "schedule" ]] || [[ "$UPSTREAM_DIGEST" != "$CURRENT_DIGEST" ]]; then
+          if [[ "${{ github.event_name }}" != "schedule" ]]; then
             echo "needs_build=true" >> $GITHUB_OUTPUT
-            echo "Decision: Proceeding with build."
+            echo "Decision: Proceeding with build (triggered by '${{ github.event_name }}' event)."
+          elif [[ "$UPSTREAM_STATE" != "$CURRENT_STATE" ]]; then
+            echo "needs_build=true" >> $GITHUB_OUTPUT
+            echo "Decision: Proceeding with build (upstream image or plugin changed)."
           else
             echo "needs_build=false" >> $GITHUB_OUTPUT
-            echo "Decision: No upstream changes detected. Skipping build."
+            echo "Decision: Skipping build (scheduled run and all upstreams unchanged)."
           fi
 
       - uses: docker/setup-buildx-action@v3
@@ -63,7 +82,7 @@ jobs:
           push: true
           pull: true
           labels: |
-            org.opencontainers.image.base.digest=${{ steps.check.outputs.upstream_digest }}
+            org.opencontainers.image.base.digest=${{ steps.check.outputs.upstream_state }}
           tags: |
             ${{ env.TARGET_IMAGE }}:latest
             ${{ env.TARGET_IMAGE }}:${{ github.run_number }}
