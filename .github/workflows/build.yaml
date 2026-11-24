@@ -9,7 +9,7 @@ on:
 env:
   TARGET_IMAGE: ghcr.io/ziffusion/caddy
   DOCKER_IMAGES: "caddy:builder caddy:latest"
-  GO_MODULES: "://github.com ://github.com ://github.com"
+  GO_MODULES: "github.com/mholt/caddy-webdav github.com/caddyserver/forwardproxy github.com/lucaslorentz/caddy-docker-proxy/v2"
 
 jobs:
   build:
@@ -38,9 +38,9 @@ jobs:
             UPSTREAM_STATE="${UPSTREAM_STATE}${img}=${DIGEST};"
           done
 
-          # 2. Check latest version/pseudo-version of each Go module
+          # 2. Check latest version of each Go module using native Go tooling
           for mod in $GO_MODULES; do
-            MOD_VER=$(curl -fsSL "https://golang.org{mod}/@latest" | jq -r '.Version')
+            MOD_VER=$(go list -m -f '{{.Version}}' "${mod}@latest")
             echo "Upstream module [$mod]: $MOD_VER"
             UPSTREAM_STATE="${UPSTREAM_STATE}${mod}=${MOD_VER};"
           done
