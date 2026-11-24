@@ -1,24 +1,38 @@
-name: build
+name: Build Caddy image
+
 on:
   schedule:
-    - cron: "0 4 * * *"   # every day at 04:00 UTC
-  workflow_dispatch:
+    - cron: "17 4 * * *"        # daily, 04:17 UTC
   push:
     branches: [main]
+    paths: [Dockerfile, .github/workflows/build.yml]
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Build even if nothing changed"
+        type: boolean
+        default: false
 
 env:
-  TARGET_IMAGE: ghcr.io/ziffusion/caddy
-  DOCKER_IMAGES: "caddy:builder caddy:latest"
-  GO_MODULES: "github.com/mholt/caddy-webdav github.com/caddyserver/forwardproxy github.com/lucaslorentz/caddy-docker-proxy/v2"
+  IMAGE: ghcr.io/${{ github.repository }}
+
+permissions:
+  contents: read
+  packages: write
 
 jobs:
-  build:
+  check:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
+    outputs:
+      fingerprint: ${{ steps.fp.outputs.fingerprint }}
+      build: ${{ steps.cmp.outputs.build }}
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
 
       - uses: docker/login-action@v3
         with:
@@ -26,64 +40,101 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Check for upstream changes
-        id: check
+      - name: Compute upstream fingerprint
+        id: fp
         run: |
-          UPSTREAM_STATE=""
+          set -euo pipefail
+          fp=$(
+            for img in caddy:builder caddy:latest; do
+              echo "$img $(docker buildx imagetools inspect "$img" --format '{{.Manifest.Digest}}')"
+            done
+            for mod in \
+              github.com/mholt/caddy-webdav \
+              github.com/caddyserver/forwardproxy \
+              github.com/lucaslorentz/caddy-docker-proxy/v2; do
+              echo "$mod $(go list -m -f '{{.Version}}' "$mod@latest")"
+            done
+            echo "dockerfile $(sha256sum Dockerfile | cut -d' ' -f1)"
+          )
+          echo "$fp"
+          # single line, ';'-separated, so it fits in an image label and a step output
+          echo "fingerprint=$(echo "$fp" | paste -sd';')" >> "$GITHUB_OUTPUT"
 
-          # 1. Check both caddy:builder and caddy:latest digests
-          for img in $DOCKER_IMAGES; do
-            DIGEST=$(docker buildx imagetools inspect "$img" --format '{{json .Manifest.Digest}}' | tr -d '"')
-            echo "Upstream image [$img]: $DIGEST"
-            UPSTREAM_STATE="${UPSTREAM_STATE}${img}=${DIGEST};"
-          done
+      - name: Compare with last published image
+        id: cmp
+        env:
+          CURRENT: ${{ steps.fp.outputs.fingerprint }}
+          EVENT: ${{ github.event_name }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -u
+          last=$(skopeo inspect --no-tags "docker://${IMAGE}:latest" 2>/dev/null \
+                 | jq -r '.Labels["upstream.fingerprint"] // ""' || true)
 
-          # 2. Check latest version of each Go module using native Go tooling
-          for mod in $GO_MODULES; do
-            MOD_VER=$(go list -m -f '{{.Version}}' "${mod}@latest")
-            echo "Upstream module [$mod]: $MOD_VER"
-            UPSTREAM_STATE="${UPSTREAM_STATE}${mod}=${MOD_VER};"
-          done
+          build=false
+          reason="nothing changed"
+          changes=""
 
-          echo "upstream_state=$UPSTREAM_STATE" >> $GITHUB_OUTPUT
-
-          # 3. Read the saved state label from our current linux/amd64 image on GHCR
-          AMD64_DIGEST=$(docker buildx imagetools inspect "${TARGET_IMAGE}:latest" --raw 2>/dev/null | jq -r '.manifests[] | select(.platform.architecture == "amd64") | .digest' || echo "")
-
-          if [[ -n "$AMD64_DIGEST" ]]; then
-            CURRENT_STATE=$(docker buildx imagetools inspect "${TARGET_IMAGE}@${AMD64_DIGEST}" --format '{{index .Image.Config.Labels "org.opencontainers.image.base.digest"}}' 2>/dev/null || echo "none")
+          if [ -z "$last" ]; then
+            reason="no previous image (or it has no fingerprint label)"
+            build=true
           else
-            CURRENT_STATE="none"
+            echo "$last"    | tr ';' '\n' | sort > last.txt
+            echo "$CURRENT" | tr ';' '\n' | sort > current.txt
+            changes=$(diff -U0 last.txt current.txt | grep -E '^[+-][^+-]' || true)
+            [ -n "$changes" ] && { reason="upstream changed"; build=true; }
           fi
 
-          echo "----------------------------------------"
-          echo "Trigger event:       ${{ github.event_name }}"
-          echo "Upstream state:      $UPSTREAM_STATE"
-          echo "Current image label: $CURRENT_STATE"
-          echo "----------------------------------------"
-
-          if [[ "${{ github.event_name }}" != "schedule" ]]; then
-            echo "needs_build=true" >> $GITHUB_OUTPUT
-            echo "Decision: Proceeding with build (triggered by '${{ github.event_name }}' event)."
-          elif [[ "$UPSTREAM_STATE" != "$CURRENT_STATE" ]]; then
-            echo "needs_build=true" >> $GITHUB_OUTPUT
-            echo "Decision: Proceeding with build (one or more upstreams changed)."
-          else
-            echo "needs_build=false" >> $GITHUB_OUTPUT
-            echo "Decision: Skipping build (scheduled run and all 5 upstreams unchanged)."
+          if [ "$EVENT" != "schedule" ]; then
+            build=true; reason="triggered by $EVENT (${reason})"
+          elif [ "$FORCE" = "true" ]; then
+            build=true; reason="forced (${reason})"
           fi
+
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Build decision: \`$build\`"
+            echo "**Reason:** $reason"
+            if [ -n "$changes" ]; then
+              echo
+              echo '```diff'
+              echo "$changes"
+              echo '```'
+            fi
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  build:
+    needs: check
+    if: needs.check.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
       - uses: docker/setup-buildx-action@v3
-        if: steps.check.outputs.needs_build == 'true'
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=latest
+            type=raw,value={{date 'YYYYMMDD'}}
+          labels: |
+            upstream.fingerprint=${{ needs.check.outputs.fingerprint }}
 
       - uses: docker/build-push-action@v6
-        if: steps.check.outputs.needs_build == 'true'
         with:
           context: .
+          platforms: linux/amd64
           push: true
-          pull: true
-          labels: |
-            org.opencontainers.image.base.digest=${{ steps.check.outputs.upstream_state }}
-          tags: |
-            ${{ env.TARGET_IMAGE }}:latest
-            ${{ env.TARGET_IMAGE }}:${{ github.run_number }}
+          pull: true          # always fetch fresh base images
+          no-cache: true      # otherwise xcaddy may reuse a cached layer with old plugin versions
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
